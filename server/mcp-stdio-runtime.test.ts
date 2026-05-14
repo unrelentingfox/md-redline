@@ -412,3 +412,118 @@ describe('handleRequestReviewToolCall', () => {
     expect(result.content[0].text).toContain('Review was not completed');
   });
 });
+
+describe('review URL is surfaced in tool responses', () => {
+  // The URL has to appear in the agent-visible text content, not just the
+  // sendProgress side channel — agents don't see progress notifications in
+  // their conversation context. Without the URL in `content`, an agent on a
+  // remote dev host can't relay a clickable link to the user's laptop.
+
+  it('includes the review URL in the batch response (new session)', async () => {
+    const client = {
+      grantAccess: vi.fn().mockResolvedValue(undefined),
+      createSession: vi.fn().mockResolvedValue({ sessionId: 'rev_42', url: '/?review=rev_42' }),
+      waitForSession: vi.fn().mockResolvedValue({
+        status: 'batch',
+        prompt: 'BATCH',
+        commentIds: [],
+      }),
+      abortSession: vi.fn(),
+    };
+    const result = await handleRequestReviewToolCall(
+      { mode: 'new', filePaths: ['/a.md'], enableResolve: false },
+      {
+        client,
+        openInBrowser: vi.fn().mockResolvedValue(undefined),
+        baseUrl: 'http://dev-dsk-myname.us-east-1.amazon.com:3001',
+      },
+    );
+    expect(result.content[0].text).toContain(
+      'http://dev-dsk-myname.us-east-1.amazon.com:3001/?review=rev_42',
+    );
+  });
+
+  it('includes the review URL in the still-waiting response (pending)', async () => {
+    const client = {
+      grantAccess: vi.fn().mockResolvedValue(undefined),
+      createSession: vi.fn().mockResolvedValue({ sessionId: 'rev_42', url: '/?review=rev_42' }),
+      waitForSession: vi.fn().mockResolvedValue({ status: 'pending' }),
+      abortSession: vi.fn(),
+    };
+    const result = await handleRequestReviewToolCall(
+      { mode: 'new', filePaths: ['/a.md'], enableResolve: false },
+      {
+        client,
+        openInBrowser: vi.fn().mockResolvedValue(undefined),
+        baseUrl: 'http://dev-dsk-myname.us-east-1.amazon.com:3001',
+      },
+    );
+    expect(result.content[0].text).toContain(
+      'http://dev-dsk-myname.us-east-1.amazon.com:3001/?review=rev_42',
+    );
+  });
+
+  it('includes the review URL in the done response (final batch)', async () => {
+    const client = {
+      grantAccess: vi.fn().mockResolvedValue(undefined),
+      createSession: vi.fn().mockResolvedValue({ sessionId: 'rev_42', url: '/?review=rev_42' }),
+      waitForSession: vi.fn().mockResolvedValue({ status: 'done', prompt: 'FINAL' }),
+      abortSession: vi.fn(),
+    };
+    const result = await handleRequestReviewToolCall(
+      { mode: 'new', filePaths: ['/a.md'], enableResolve: false },
+      {
+        client,
+        openInBrowser: vi.fn().mockResolvedValue(undefined),
+        baseUrl: 'http://dev-dsk-myname.us-east-1.amazon.com:3001',
+      },
+    );
+    expect(result.content[0].text).toContain(
+      'http://dev-dsk-myname.us-east-1.amazon.com:3001/?review=rev_42',
+    );
+  });
+
+  it('includes the review URL in continue-mode responses', async () => {
+    const client = {
+      grantAccess: vi.fn(),
+      createSession: vi.fn(),
+      waitForSession: vi.fn().mockResolvedValue({
+        status: 'batch',
+        prompt: 'B',
+        commentIds: [],
+      }),
+      abortSession: vi.fn(),
+    };
+    const result = await handleRequestReviewToolCall(
+      { mode: 'continue', sessionId: 'rev_99' },
+      {
+        client,
+        openInBrowser: vi.fn(),
+        baseUrl: 'http://dev-dsk-myname.us-east-1.amazon.com:3001',
+      },
+    );
+    expect(result.content[0].text).toContain(
+      'http://dev-dsk-myname.us-east-1.amazon.com:3001/?review=rev_99',
+    );
+  });
+
+  it('omits the review URL from the no-comments done response', async () => {
+    // No URL needed when there's nothing to review — the response just tells
+    // the agent to continue with its plan.
+    const client = {
+      grantAccess: vi.fn().mockResolvedValue(undefined),
+      createSession: vi.fn().mockResolvedValue({ sessionId: 'rev_42', url: '/?review=rev_42' }),
+      waitForSession: vi.fn().mockResolvedValue({ status: 'done' }),
+      abortSession: vi.fn(),
+    };
+    const result = await handleRequestReviewToolCall(
+      { mode: 'new', filePaths: ['/a.md'], enableResolve: false },
+      {
+        client,
+        openInBrowser: vi.fn().mockResolvedValue(undefined),
+        baseUrl: 'http://dev-dsk-myname.us-east-1.amazon.com:3001',
+      },
+    );
+    expect(result.content[0].text).not.toContain('?review=');
+  });
+});

@@ -34,6 +34,11 @@ export async function runMcpServer(opts: RunMcpServerOptions): Promise<void> {
           'the user is still reviewing, pass the sessionId from the previous result ' +
           '(without filePaths). If the result says the user has not finished yet, ' +
           'call again with the same sessionId to keep waiting. ' +
+          'Every tool result includes a "Review URL" line — share that link with ' +
+          'the user when they ask where to leave feedback or where to view the ' +
+          'review. mdr will try to open the URL in the local browser, but on a ' +
+          'remote dev host (Cloud Desktop) the user needs the link to open it on ' +
+          'their laptop. ' +
           'IMPORTANT: while this tool is waiting (no "batch" or "done" result has ' +
           'arrived yet, or you are between batches), you do not have permission to ' +
           'read, open, edit, or otherwise act on the files under review using ' +
