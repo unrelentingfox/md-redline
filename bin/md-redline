@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { createRequire } from 'module';
 
 import { checkServer, gracefulShutdown, killPort } from './server-control.js';
+import { buildBrowserUrl, getDisplayHost, getDisplayScheme } from './url-builder.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -40,6 +41,14 @@ function printHelp() {
   console.log('  --restrict      Disable the default home-directory trust');
   console.log('  -v, --version   Show version number');
   console.log('  -h, --help      Show this help message');
+  console.log('');
+  console.log('Environment variables:');
+  console.log('  MDR_HOST        Hostname for printed URLs and the HTTPS listener.');
+  console.log('                  Set to your dev-host FQDN to use mdr from a remote browser.');
+  console.log('                  mdr serves HTTPS with a self-signed cert in this mode so');
+  console.log('                  the page runs in a secure context. The browser shows a');
+  console.log('                  "Your connection is not private" warning the first time.');
+  console.log('                  Click Advanced -> Proceed to trust the cert.');
   console.log('');
   console.log('Subcommands:');
   console.log('  mcp             Run the MCP server (called by the MCP client)');
@@ -279,13 +288,22 @@ async function ensureServerRunning() {
 }
 
 async function buildUrl(file, dir) {
+  // Port preference order:
+  //   - With MDR_HOST set, prefer the production server port. Only the
+  //     production server binds the HTTPS listener that the FQDN URL
+  //     points at; Vite's dev server uses its own cert handling and may
+  //     fall back to plain HTTP if the cert isn't on disk yet, in which
+  //     case `https://<fqdn>:5188` would not connect.
+  //   - In loopback mode, prefer the Vite client port when present so
+  //     dev-mode HMR works; fall back to the server port for production
+  //     builds where there is no Vite.
   const clientPort = await findClientPort();
   const serverPort = await findServerPort();
-  const port = clientPort ?? serverPort ?? DEFAULT_CLIENT_PORT;
-  const baseUrl = `http://localhost:${port}`;
-  if (file) return `${baseUrl}?file=${encodeURIComponent(file)}`;
-  if (dir) return `${baseUrl}?dir=${encodeURIComponent(dir)}`;
-  return baseUrl;
+  const mdrHostSet = typeof process.env.MDR_HOST === 'string' && process.env.MDR_HOST.trim() !== '';
+  const port = mdrHostSet
+    ? (serverPort ?? clientPort ?? DEFAULT_CLIENT_PORT)
+    : (clientPort ?? serverPort ?? DEFAULT_CLIENT_PORT);
+  return buildBrowserUrl({ port, file, dir });
 }
 
 async function openInBrowser(url) {
@@ -463,16 +481,36 @@ async function runMcpStdio() {
   const mod = await import(pathToFileURL(distMcp).href);
 
   // Bin owns the baseUrl state so there's no module-level mutable in the
-  // mcp-stdio module. runMcpServer reads it via getBaseUrl() on every tool
-  // call, after ensureServerRunning() has had a chance to refresh it.
-  let currentBaseUrl = `http://localhost:${DEFAULT_CLIENT_PORT}`;
+  // mcp-stdio module. runMcpServer reads both URLs via getters on every
+  // tool call, after ensureServerRunning() has had a chance to refresh
+  // them.
+  //
+  // Two URLs to track:
+  //   - internal: always http://localhost:<port>. The MCP client uses
+  //     this for its server-to-server fetches (grant-access, create-
+  //     session, wait, abort). Loopback HTTP listener is always running,
+  //     so this works in every mode and avoids Node's fetch having to
+  //     trust the self-signed cert just to talk to itself.
+  //   - display: https://<fqdn>:<port> when MDR_HOST is set, else
+  //     http://localhost:<port>. Surfaced to the user via tool response
+  //     content and passed to openInBrowser.
+  //
+  // Scheme + host for the display URL are env-derived and don't change
+  // for the life of the process, so cache them once and only re-derive
+  // the port.
+  const displayScheme = getDisplayScheme();
+  const displayHost = getDisplayHost();
+  let internalBaseUrl = `http://localhost:${DEFAULT_CLIENT_PORT}`;
+  let displayBaseUrl = `${displayScheme}://${displayHost}:${DEFAULT_CLIENT_PORT}`;
   await mod.runMcpServer({
-    getBaseUrl: () => currentBaseUrl,
+    getInternalBaseUrl: () => internalBaseUrl,
+    getDisplayBaseUrl: () => displayBaseUrl,
     openInBrowser,
     ensureServerRunning: async () => {
       await ensureServerRunning();
       const port = (await findClientPort()) ?? (await findServerPort()) ?? DEFAULT_CLIENT_PORT;
-      currentBaseUrl = `http://localhost:${port}`;
+      internalBaseUrl = `http://localhost:${port}`;
+      displayBaseUrl = `${displayScheme}://${displayHost}:${port}`;
     },
   });
 }

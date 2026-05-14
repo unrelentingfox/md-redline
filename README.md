@@ -177,6 +177,30 @@ To use the strict per-folder model instead, run `mdr --restrict` once after inst
 
 File saves use atomic write-then-rename and mtime-based conflict detection to prevent data loss from concurrent edits. Mermaid SVG output is sanitized via DOMPurify before rendering. Only run md-redline in environments you trust.
 
+### Remote dev hosts
+
+By default mdr binds to `127.0.0.1` and prints `http://localhost:...` URLs, which works only when your browser runs on the same machine as the server. If you develop on a Cloud Desktop or other remote host, set `MDR_HOST` to the hostname your laptop browser uses to reach that machine:
+
+```bash
+export MDR_HOST=$(hostname -f)
+mdr docs/spec.md
+# Open in your browser: https://dev-dsk-yourname.us-east-1.amazon.com:3001/?file=...
+```
+
+When `MDR_HOST` is set, mdr:
+
+- resolves `MDR_HOST` and binds an HTTPS listener on that specific interface (instead of loopback only), so the FQDN's network interface accepts connections while other NICs (Docker bridges, VPN tunnels, secondary interfaces) are not exposed,
+- mints a self-signed TLS cert for that hostname (cached at `~/.md-redline-certs/<hostname>.{key,crt}`) so the page is served from a secure context, which lets browser APIs like `crypto.randomUUID` and `navigator.clipboard` work,
+- keeps an HTTP listener on `127.0.0.1` for the local CLI's internal probes,
+- accepts the hostname in the Host header allowlist (alongside the loopback defaults), and
+- substitutes it into every URL printed for the user (CLI banner, MCP `mdr_request_review` tool response, browser-open).
+
+The first time you visit `https://<MDR_HOST>:<port>` the browser shows a "Your connection is not private" warning because the cert is self-signed. Click **Advanced → Proceed** to trust it. The cert is valid for two years and renews automatically before it expires.
+
+When `MDR_HOST` is unset the behavior is unchanged: loopback bind, loopback-only Host header, plain HTTP, and `localhost` URLs.
+
+**Security note:** setting `MDR_HOST` exposes mdr to your local network. Only enable it on trusted single-user dev hosts. The Host header allowlist still blocks DNS rebinding from arbitrary attacker-controlled hostnames, but anyone who can reach `${MDR_HOST}:${port}` on your machine can read and write files inside your trusted roots. The self-signed cert lives at `~/.md-redline-certs/` with `0600` permissions on the key.
+
 ## Development
 
 ### From source

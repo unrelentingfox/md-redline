@@ -5,30 +5,44 @@ import type {
   WaitResult,
 } from './types';
 
-const BATCH_PREAMBLE = (sessionId: string) =>
+/**
+ * Build the user-facing review URL for a session. Used in tool responses
+ * so the URL is part of the agent's text context (not just a side-channel
+ * progress notification, which the agent never sees in conversation).
+ * The agent can then surface the link to the user — important when mdr
+ * runs on a remote dev host and the URL isn't a clickable localhost.
+ */
+function buildReviewUrl(baseUrl: string, sessionId: string): string {
+  return `${baseUrl.replace(/\/$/, '')}/?review=${encodeURIComponent(sessionId)}`;
+}
+
+const BATCH_PREAMBLE = (sessionId: string, reviewUrl: string) =>
   `Review batch received (session ${sessionId}). Address ONLY the comments ` +
   `listed below. Leave any other comment markers in the file untouched.\n\n` +
+  `Review URL (share with the user if they need it): ${reviewUrl}\n\n` +
   `IMPORTANT: After you finish addressing these comments, you MUST call ` +
   `mdr_request_review again with sessionId "${sessionId}" (no filePaths). ` +
   `The review is NOT complete. The user may have more feedback. ` +
   `Do not summarize or report to the user until the tool ` +
   `returns a "done" signal.\n\n===\n\n`;
 
-const DONE_PREAMBLE =
-  'Review handed off (final batch). The user has finished reviewing. ' +
-  'Address ONLY the comments listed below. Leave any other comment markers ' +
-  'in the file untouched. Do not poll for more feedback.\n\n===\n\n';
+const DONE_PREAMBLE = (reviewUrl: string) =>
+  `Review handed off (final batch). The user has finished reviewing. ` +
+  `Address ONLY the comments listed below. Leave any other comment markers ` +
+  `in the file untouched. Do not poll for more feedback.\n\n` +
+  `Review URL (share with the user if they ask where to see the review): ${reviewUrl}\n\n===\n\n`;
 
 const DONE_NO_COMMENTS =
   'Review complete. The user has no more feedback. Continue with your original plan.';
 
-const STILL_WAITING = (sessionId: string) =>
+const STILL_WAITING = (sessionId: string, reviewUrl: string) =>
   `Review in progress. The user is still adding comments — the file(s) under ` +
   `review may contain unsubmitted @comment markers that are not yet part of ` +
   `any batch. You do not have permission to read, open, edit, or otherwise ` +
   `access the files under review while this session is active. You do not ` +
   `have permission to address @comment markers you discover by reading the ` +
   `file directly — they are not yours to act on until the user submits them. ` +
+  `\n\nReview URL (share with the user if they ask where to leave feedback): ${reviewUrl}\n\n` +
   `Call mdr_request_review again with sessionId "${sessionId}" (no filePaths) ` +
   `and wait. Only act on comments delivered to you in a "batch" or "done" ` +
   `tool result.`;
@@ -66,6 +80,7 @@ export async function handleRequestReviewToolCall(
   if (input.mode === 'continue') {
     return handleContinueReviewToolCall(input.sessionId, {
       client: ctx.client,
+      baseUrl: ctx.baseUrl,
       sendProgress: ctx.sendProgress,
       signal: ctx.signal,
     });
@@ -78,7 +93,11 @@ export async function handleRequestReviewToolCall(
     enableResolve: input.enableResolve,
   });
 
-  const fullUrl = `${ctx.baseUrl.replace(/\/$/, '')}${session.url}`;
+  // Use buildReviewUrl in both new-session and continue-mode paths so the
+  // URL shape stays in lockstep. The server hands back `session.url` too,
+  // but tying both call sites to one helper avoids future drift if either
+  // side changes its query-string convention.
+  const fullUrl = buildReviewUrl(ctx.baseUrl, session.sessionId);
   // Skip opening the browser when the server returned an existing session
   // for the same files — the tab is already open from the first call.
   if (session.created !== false) {
@@ -130,20 +149,20 @@ export async function handleRequestReviewToolCall(
 
   if (result.status === 'pending') {
     return {
-      content: [{ type: 'text', text: STILL_WAITING(session.sessionId) }],
+      content: [{ type: 'text', text: STILL_WAITING(session.sessionId, fullUrl) }],
     };
   }
 
   if (result.status === 'batch') {
     return {
-      content: [{ type: 'text', text: BATCH_PREAMBLE(session.sessionId) + result.prompt }],
+      content: [{ type: 'text', text: BATCH_PREAMBLE(session.sessionId, fullUrl) + result.prompt }],
     };
   }
 
   if (result.status === 'done') {
     if (result.prompt) {
       return {
-        content: [{ type: 'text', text: DONE_PREAMBLE + result.prompt }],
+        content: [{ type: 'text', text: DONE_PREAMBLE(fullUrl) + result.prompt }],
       };
     }
     return {
@@ -168,7 +187,7 @@ export async function handleRequestReviewToolCall(
 
 export async function handleContinueReviewToolCall(
   sessionId: string,
-  ctx: Pick<ToolCallContext, 'client' | 'sendProgress' | 'signal'>,
+  ctx: Pick<ToolCallContext, 'client' | 'baseUrl' | 'sendProgress' | 'signal'>,
 ): Promise<ToolCallResult> {
   ctx.sendProgress?.(`mdr: waiting for next review batch (session ${sessionId})`);
 
@@ -200,22 +219,24 @@ export async function handleContinueReviewToolCall(
     ctx.signal?.removeEventListener('abort', cancelListener);
   }
 
+  const reviewUrl = buildReviewUrl(ctx.baseUrl, sessionId);
+
   if (result.status === 'pending') {
     return {
-      content: [{ type: 'text', text: STILL_WAITING(sessionId) }],
+      content: [{ type: 'text', text: STILL_WAITING(sessionId, reviewUrl) }],
     };
   }
 
   if (result.status === 'batch') {
     return {
-      content: [{ type: 'text', text: BATCH_PREAMBLE(sessionId) + result.prompt }],
+      content: [{ type: 'text', text: BATCH_PREAMBLE(sessionId, reviewUrl) + result.prompt }],
     };
   }
 
   if (result.status === 'done') {
     if (result.prompt) {
       return {
-        content: [{ type: 'text', text: DONE_PREAMBLE + result.prompt }],
+        content: [{ type: 'text', text: DONE_PREAMBLE(reviewUrl) + result.prompt }],
       };
     }
     return {

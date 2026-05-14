@@ -40,7 +40,7 @@
     "dev:server": "tsx server/index.ts",
     "dev:client": "vite",
     "build": "tsc -b && vite build && npm run build:server",
-    "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --outfile=dist/server.js --external:hono --external:@hono/node-server && esbuild server/mcp-stdio.ts --bundle --platform=node --format=esm --outfile=dist/mcp-stdio.js --external:@modelcontextprotocol/sdk",
+    "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --outfile=dist/server.js --external:hono --external:@hono/node-server --external:selfsigned && esbuild server/mcp-stdio.ts --bundle --platform=node --format=esm --outfile=dist/mcp-stdio.js --external:@modelcontextprotocol/sdk",
     "prepublishOnly": "npm run build",
     "preview": "vite preview",
     "lint": "eslint .",
@@ -75,6 +75,7 @@
     "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",
     "remark-rehype": "^11.1.2",
+    "selfsigned": "^5.5.0",
     "unified": "^11.0.5",
     "unist-util-visit": "^5.1.0"
   },

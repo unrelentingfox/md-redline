@@ -1707,6 +1707,7 @@ export default function App() {
         onBatchSent={handleBatchSent}
         showToast={showToast}
         commentIdsByFile={commentIdsByFile}
+        onOpenFile={openTab}
       />
       <Toolbar
         error={error}

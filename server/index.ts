@@ -2,12 +2,14 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { bodyLimit } from 'hono/body-limit';
 import { serve } from '@hono/node-server';
+import { createServer as createHttpsServer } from 'https';
 import { readFile, readdir, stat, realpath, rename, open } from 'fs/promises';
 import { randomBytes } from 'crypto';
 import { watch, statSync, realpathSync, unlinkSync, type FSWatcher } from 'fs';
 import { join, extname, resolve, dirname } from 'path';
 import { homedir, platform, tmpdir } from 'os';
 import { execFile } from 'child_process';
+import { lookup as dnsLookup } from 'dns/promises';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { createRequire } from 'module';
 import {
@@ -19,6 +21,7 @@ import {
 import { injectSvgDimensions } from './svg-dimensions';
 import { ReviewSessionStore } from './review-sessions';
 import { registerReviewSessionRoutes } from './routes/review-sessions';
+import { getOrCreateSelfSignedCert } from './tls';
 
 const require = createRequire(import.meta.url);
 const { version: APP_VERSION } = require('../package.json') as { version: string };
@@ -56,6 +59,13 @@ export interface CreateAppOptions {
   platformName?: NodeJS.Platform;
   staticDir?: string;
   defaultTrustHome?: boolean;
+  /**
+   * Hostname to accept in the Host header allowlist in addition to the
+   * loopback defaults (localhost, 127.0.0.1, ::1). When unset, the
+   * allowlist is loopback-only. Falls back to the MDR_HOST env var.
+   * See README "Remote dev hosts" for the full opt-in story.
+   */
+  mdrHost?: string;
 }
 
 function canonicalize(p: string): string {
@@ -116,6 +126,12 @@ export function createApp(options: CreateAppOptions = {}) {
   const platformName = options.platformName ?? platform();
   const execFileImpl = options.execFileImpl ?? execFile;
   const caseInsensitivePaths = platformName === 'win32';
+  // Optional remote-host opt-in. When set, the Host header allowlist accepts
+  // this hostname in addition to the loopback defaults, and the listener
+  // binds 0.0.0.0 in production so the FQDN's interface accepts traffic.
+  // Trim defensively so `MDR_HOST=" "` doesn't silently widen the allowlist.
+  const mdrHostRaw = options.mdrHost ?? process.env.MDR_HOST ?? '';
+  const mdrHost = mdrHostRaw.trim().toLowerCase();
 
   const app = new Hono();
   // Allow CORS only from Vite dev server ports (default 5188-5197, or custom via env)
@@ -148,14 +164,18 @@ export function createApp(options: CreateAppOptions = {}) {
     }),
   );
   app.use('*', bodyLimit({ maxSize: 10 * 1024 * 1024 }));
-  // Host header allowlist — closes DNS rebinding. The server only binds to
-  // 127.0.0.1, so any request reaching us either came from a localhost-
-  // bound caller (curl, Vite proxy, the SPA itself) OR from a browser whose
-  // DNS resolver returned 127.0.0.1 for an attacker-controlled hostname.
-  // The CORS allowlist blocks cross-origin JS reads but does NOT prevent
-  // simple GETs from triggering server side effects, and does NOT prevent
-  // a rebinding attack where the attacker site IS the active origin.
+  // Host header allowlist — closes DNS rebinding. The server normally only
+  // binds to 127.0.0.1, so any request reaching us either came from a
+  // localhost-bound caller (curl, Vite proxy, the SPA itself) OR from a
+  // browser whose DNS resolver returned 127.0.0.1 for an attacker-controlled
+  // hostname. The CORS allowlist blocks cross-origin JS reads but does NOT
+  // prevent simple GETs from triggering server side effects, and does NOT
+  // prevent a rebinding attack where the attacker site IS the active origin.
   // Verifying the Host header is loopback closes that gap.
+  //
+  // When MDR_HOST is set the listener binds 0.0.0.0 so the user's dev-host
+  // FQDN works from a laptop browser. We extend the allowlist with that
+  // hostname so legitimate FQDN requests aren't rejected.
   app.use('*', async (c, next) => {
     const host = c.req.header('host');
     // A missing Host header can only come from an internal in-process
@@ -165,10 +185,14 @@ export function createApp(options: CreateAppOptions = {}) {
     // has full code execution and there's nothing to defend against.
     if (host) {
       // Strip an optional port. IPv6 hosts arrive as `[::1]:3001`.
-      const hostname = host.startsWith('[')
+      const hostname = (host.startsWith('[')
         ? host.slice(1, host.indexOf(']'))
-        : host.split(':')[0];
-      if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '::1') {
+        : host.split(':')[0]
+      ).toLowerCase();
+      const isLoopback =
+        hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+      const isMdrHost = mdrHost !== '' && hostname === mdrHost;
+      if (!isLoopback && !isMdrHost) {
         return c.json({ error: 'Invalid Host header' }, 400);
       }
     }
@@ -1127,20 +1151,148 @@ const DEFAULT_PORT = Number.parseInt(process.env.MD_REDLINE_PORT ?? process.env.
 const MAX_PORT_ATTEMPTS = 10;
 const PORT_FILE = join(tmpdir(), 'md-redline.port');
 
-function tryListen(appFetch: typeof app.fetch, port: number): Promise<number> {
+async function resolveMdrHostIp(): Promise<string | null> {
+  // When MDR_HOST is set the user opts in to accepting traffic on a remote
+  // dev host's network interface (Cloud Desktops, etc). Resolve the hostname
+  // and bind that specific IP rather than 0.0.0.0 so the listener is tied
+  // to one NIC instead of every interface (Docker bridges, VPN tunnels,
+  // secondary NICs all stay invisible). Returns null when MDR_HOST is unset.
+  const mdrHost = process.env.MDR_HOST?.trim();
+  if (!mdrHost) return null;
+  try {
+    const { address } = await dnsLookup(mdrHost);
+    return address;
+  } catch (err) {
+    // Wrap the raw getaddrinfo error so the user sees actionable advice
+    // instead of a bare ENOTFOUND. The original error is still visible if
+    // they want it via `err.cause`.
+    const code = (err as NodeJS.ErrnoException).code ?? 'unknown';
+    const wrapped = new Error(
+      `Could not resolve MDR_HOST="${mdrHost}" (${code}). ` +
+        'Check the hostname or unset MDR_HOST to use loopback only.',
+    );
+    (wrapped as Error & { cause?: unknown }).cause = err;
+    throw wrapped;
+  }
+}
+
+interface ServerHandle {
+  close: () => Promise<void>;
+}
+
+function attachLifetimeErrorHandler(server: ReturnType<typeof serve>, label: string): void {
+  // Once the bind callback fires, the original promise has settled and any
+  // later `rej(err)` is a no-op — Node would silently swallow lifecycle
+  // errors (TLS context faults, unexpected socket closes). Log them so we
+  // at least see them in the server console.
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    console.error(`[mdr] ${label} listener error:`, err);
+  });
+}
+
+function listenHttp(
+  appFetch: typeof app.fetch,
+  port: number,
+  hostname: string,
+): Promise<ServerHandle> {
   return new Promise((res, rej) => {
-    const server = serve({ fetch: appFetch, port, hostname: '127.0.0.1' }, () => res(port));
-    server.on('error', (err: NodeJS.ErrnoException) => {
-      rej(err);
+    let bound = false;
+    const server = serve({ fetch: appFetch, port, hostname }, () => {
+      bound = true;
+      attachLifetimeErrorHandler(server, 'http');
+      res({
+        close: () => new Promise((closeRes) => server.close(() => closeRes())),
+      });
+    });
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      if (!bound) rej(err);
     });
   });
 }
 
-async function findAvailablePort(appFetch: typeof app.fetch): Promise<number> {
+function listenHttps(
+  appFetch: typeof app.fetch,
+  port: number,
+  hostname: string,
+  key: string,
+  cert: string,
+): Promise<ServerHandle> {
+  return new Promise((res, rej) => {
+    let bound = false;
+    const server = serve(
+      {
+        fetch: appFetch,
+        port,
+        hostname,
+        createServer: createHttpsServer,
+        serverOptions: { key, cert },
+      },
+      () => {
+        bound = true;
+        attachLifetimeErrorHandler(server, 'https');
+        res({
+          close: () => new Promise((closeRes) => server.close(() => closeRes())),
+        });
+      },
+    );
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      if (!bound) rej(err);
+    });
+  });
+}
+
+interface ListenResult {
+  port: number;
+  https: boolean;
+}
+
+/**
+ * Bind the HTTP listener to 127.0.0.1 and (when MDR_HOST is set) an
+ * additional HTTPS listener to the FQDN's resolved IP, both on the same
+ * port. The HTTP listener stays loopback-only so internal CLI calls keep
+ * working unchanged; the HTTPS listener is what the browser hits, which
+ * gives us secure context (`crypto.randomUUID`, `navigator.clipboard`).
+ *
+ * Both listeners share one port so the existing port-file machinery and
+ * CLI fetches don't have to track two values. If either listener fails,
+ * we close any already-bound listener and try the next port.
+ */
+async function tryListenPort(
+  appFetch: typeof app.fetch,
+  port: number,
+  mdrHostIp: string | null,
+  cert: { key: string; cert: string } | null,
+): Promise<ListenResult> {
+  const httpHandle = await listenHttp(appFetch, port, '127.0.0.1');
+  if (!mdrHostIp || !cert) {
+    return { port, https: false };
+  }
+  try {
+    await listenHttps(appFetch, port, mdrHostIp, cert.key, cert.cert);
+    return { port, https: true };
+  } catch (err) {
+    // Tear down the HTTP listener so the same port is free for the next
+    // attempt. Otherwise findAvailablePort would skip past it on every
+    // retry assuming it's still ours.
+    await httpHandle.close().catch(() => {});
+    throw err;
+  }
+}
+
+async function findAvailablePort(
+  appFetch: typeof app.fetch,
+  mdrHostIp: string | null,
+  cert: { key: string; cert: string } | null,
+): Promise<ListenResult> {
   for (let p = DEFAULT_PORT; p < DEFAULT_PORT + MAX_PORT_ATTEMPTS; p++) {
     try {
-      return await tryListen(appFetch, p);
+      return await tryListenPort(appFetch, p, mdrHostIp, cert);
     } catch (err) {
+      // EADDRINUSE on either listener (HTTP or HTTPS) means the port is
+      // taken — bump and retry. tryListenPort tears down the HTTP listener
+      // before re-throwing the HTTPS error, so the port is fully released.
+      // Any other error (cert load failure, hostname unbindable) bubbles
+      // up so the user sees it instead of cycling silently.
       if ((err as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw err;
     }
   }
@@ -1154,8 +1306,15 @@ const isMainModule =
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isMainModule) {
-  findAvailablePort(app.fetch)
-    .then(async (port) => {
+  const mdrHostName = process.env.MDR_HOST?.trim() ?? '';
+  (async () => {
+    // Resolve and mint before binding so DNS or cert errors surface before
+    // we hold a port.
+    const mdrHostIp = await resolveMdrHostIp();
+    const cert = mdrHostName ? await getOrCreateSelfSignedCert(mdrHostName) : null;
+    return findAvailablePort(app.fetch, mdrHostIp, cert);
+  })()
+    .then(async ({ port, https }) => {
       // Write port file safely: use O_EXCL to prevent symlink clobber attacks.
       // If the file already exists (previous unclean exit), unlink it first
       // to avoid following a symlink that may have replaced the stale file.
@@ -1173,7 +1332,13 @@ if (isMainModule) {
           throw e;
         }
       }
-      console.log(`md-redline server running on http://localhost:${port}`);
+      if (https && mdrHostName) {
+        console.log(
+          `md-redline server: http://localhost:${port} (loopback) | https://${mdrHostName}:${port} (FQDN)`,
+        );
+      } else {
+        console.log(`md-redline server running on http://localhost:${port}`);
+      }
       const initialArg = process.argv[2] ? resolve(process.cwd(), process.argv[2]) : '';
       if (initialArg) {
         console.log(`Initial path: ${initialArg}`);

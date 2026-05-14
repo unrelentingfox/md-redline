@@ -34,6 +34,8 @@ export async function runMcpServer(opts: RunMcpServerOptions): Promise<void> {
           'the user is still reviewing, pass the sessionId from the previous result ' +
           '(without filePaths). If the result says the user has not finished yet, ' +
           'call again with the same sessionId to keep waiting. ' +
+          'Tool results include a "Review URL" line; share it with the user if ' +
+          'mdr could not open the browser locally (typical on remote dev hosts). ' +
           'IMPORTANT: while this tool is waiting (no "batch" or "done" result has ' +
           'arrived yet, or you are between batches), you do not have permission to ' +
           'read, open, edit, or otherwise act on the files under review using ' +
@@ -78,7 +80,8 @@ export async function runMcpServer(opts: RunMcpServerOptions): Promise<void> {
     }
 
     await opts.ensureServerRunning();
-    const baseUrl = opts.getBaseUrl();
+    const internalBaseUrl = opts.getInternalBaseUrl();
+    const displayBaseUrl = opts.getDisplayBaseUrl();
 
     const progressToken = request.params._meta?.progressToken;
     let progressCounter = 0;
@@ -104,9 +107,9 @@ export async function runMcpServer(opts: RunMcpServerOptions): Promise<void> {
     const signal = (extra as { signal?: AbortSignal } | undefined)?.signal;
 
     const result = await handleRequestReviewToolCall(validation.value, {
-      client: createMdrClient(baseUrl),
+      client: createMdrClient(internalBaseUrl),
       openInBrowser: opts.openInBrowser,
-      baseUrl,
+      baseUrl: displayBaseUrl,
       sendProgress,
       signal,
     });

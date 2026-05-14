@@ -63,11 +63,24 @@ export interface ToolCallResult {
 
 export interface RunMcpServerOptions {
   /**
-   * Getter for the web server base URL. Called on every tool call so the
-   * bin script can refresh the port after `ensureServerRunning` without any
-   * module-level mutable state or ordering concerns.
+   * Getter for the URL the MCP subprocess uses to talk to its own web
+   * server. Always loopback HTTP because the loopback listener is always
+   * running and the MCP subprocess executes on the same host. Using HTTPS
+   * here would require trusting the self-signed cert from inside Node's
+   * fetch, which is unnecessary work for a same-host call.
    */
-  getBaseUrl: () => string;
+  getInternalBaseUrl: () => string;
+  /**
+   * Getter for the URL we hand to the user. Switches scheme/host based on
+   * MDR_HOST: https://<fqdn>:<port> when set (so the laptop browser gets
+   * a secure context), http://localhost:<port> otherwise. Used to build
+   * the review URL surfaced in tool responses and passed to openInBrowser.
+   *
+   * Both getters are called per tool call so the bin script can refresh
+   * the port after `ensureServerRunning` without any module-level mutable
+   * state or ordering concerns.
+   */
+  getDisplayBaseUrl: () => string;
   openInBrowser: (url: string) => Promise<void>;
   ensureServerRunning: () => Promise<void>;
 }

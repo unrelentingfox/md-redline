@@ -15,6 +15,13 @@ interface ReviewBannerProps {
   showToast?: (message: string) => void;
   /** Comment IDs grouped by file path. */
   commentIdsByFile: Map<string, string[]>;
+  /**
+   * Activate (or open) the tab for the given file path. Lets the user jump
+   * to a file under review directly from the banner instead of hunting for
+   * it in the explorer. The provided callback should be `openTab` from
+   * useTabs, which switches to an already-open tab or opens it fresh.
+   */
+  onOpenFile?: (filePath: string) => void;
 }
 
 // A session is ready to send only when we have an authoritative comment count
@@ -46,6 +53,7 @@ export function ReviewBanner({
   onBatchSent,
   showToast,
   commentIdsByFile,
+  onOpenFile,
 }: ReviewBannerProps) {
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -199,9 +207,20 @@ export function ReviewBanner({
               {s.filePaths.map((p, i) => (
                 <span key={p}>
                   {i > 0 && ', '}
-                  <code className="rounded bg-current/10 px-1">
-                    {getPathBasename(p)}
-                  </code>
+                  {onOpenFile ? (
+                    <button
+                      type="button"
+                      onClick={() => onOpenFile(p)}
+                      title={`Open ${p}`}
+                      className="rounded bg-current/10 px-1 font-mono text-current underline-offset-2 hover:bg-current/20 hover:underline focus:outline-none focus:ring-2 focus:ring-current/50"
+                    >
+                      {getPathBasename(p)}
+                    </button>
+                  ) : (
+                    <code className="rounded bg-current/10 px-1">
+                      {getPathBasename(p)}
+                    </code>
+                  )}
                 </span>
               ))}
               .
